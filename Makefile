@@ -131,7 +131,10 @@ $(MISSPELL):
 	$(call go-install-tool,$(MISSPELL),github.com/client9/misspell/cmd/misspell@latest)
 
 MOCKGEN = $(BIN_DIR)/mockgen
-mock-generate: $(MOCKGEN)
+gomock:
+	GOBIN=$(BIN_DIR) go install go.uber.org/mock/mockgen@$(MOCKGEN_VERSION)
+
+mock-generate: gomock
 	PATH=$(BIN_DIR):$$PATH go generate ./...
 
 $(MOCKGEN):

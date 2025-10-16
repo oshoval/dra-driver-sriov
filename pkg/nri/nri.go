@@ -27,7 +27,7 @@ import (
 type Plugin struct {
 	stub       stub.Stub
 	podManager *podmanager.PodManager
-	cniRuntime *cni.Runtime
+	cniRuntime cni.Interface
 
 	k8sClient                   flags.ClientSets
 	networkDeviceDataUpdateChan chan types.NetworkDataChanStructList
@@ -35,7 +35,7 @@ type Plugin struct {
 }
 
 // NewNRIPlugin creates a new NRI plugin.
-func NewNRIPlugin(config *types.Config, podManager *podmanager.PodManager, cniRuntime *cni.Runtime) (*Plugin, error) {
+func NewNRIPlugin(config *types.Config, podManager *podmanager.PodManager, cniRuntime cni.Interface) (*Plugin, error) {
 	p := &Plugin{
 		podManager:                  podManager,
 		cniRuntime:                  cniRuntime,
