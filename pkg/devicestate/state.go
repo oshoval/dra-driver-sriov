@@ -254,18 +254,30 @@ func (s *Manager) applyConfigOnDevice(ctx context.Context, ifNameIndex *int, cla
 			RequestNames: []string{result.Request},
 			PoolName:     result.Pool,
 			DeviceName:   result.Device,
-			CDIDeviceIDs: []string{s.cdi.GetClaimDevices(string(claim.UID), result.Device), s.cdi.GetPodSpecName(string(claim.Status.ReservedFor[0].UID))},
+			CdiDeviceIds: []string{s.cdi.GetClaimDevices(string(claim.UID), result.Device), s.cdi.GetPodSpecName(string(claim.Status.ReservedFor[0].UID))},
 		},
 		ContainerEdits:     &cdiapi.ContainerEdits{ContainerEdits: edits},
 		NetAttachDefConfig: netAttachDefRawConfig,
 		IfName:             ifName,
 		PciAddress:         pciAddress,
+		DeviceAttributes:   cloneDeviceAttributes(deviceInfo.Attributes),
 		PodUID:             string(claim.Status.ReservedFor[0].UID),
 		Config:             config,
 		OriginalDriver:     originalDriver,
 	}
 
 	return preparedDevice, nil
+}
+
+func cloneDeviceAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) map[resourceapi.QualifiedName]resourceapi.DeviceAttribute {
+	if len(attrs) == 0 {
+		return nil
+	}
+	cloned := make(map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, len(attrs))
+	for key, value := range attrs {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // handleRDMADevice handles RDMA device configuration and returns device nodes, environment variables, or an error
