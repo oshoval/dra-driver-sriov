@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -22,6 +23,16 @@ import (
 	"github.com/k8snetworkplumbingwg/dra-driver-sriov/pkg/podmanager"
 	"github.com/k8snetworkplumbingwg/dra-driver-sriov/pkg/types"
 )
+
+type MetadataUpdater interface {
+	UpdateRequestMetadata(
+		ctx context.Context,
+		claimNamespace, claimName string,
+		claimUID k8stypes.UID,
+		requestName string,
+		devices []kubeletplugin.Device,
+	) error
+}
 
 // Plugin represents a NRI plugin catching RunPodSandbox and StopPodSandbox events to
 // call CNI ADD/DEL based on ResourceClaim attached to pods.
@@ -33,6 +44,8 @@ type Plugin struct {
 	k8sClient                   flags.ClientSets
 	networkDeviceDataUpdateChan chan types.NetworkDataChanStructList
 	interfacePrefix             string
+	enableDeviceMetadata        bool
+	metadataUpdater             MetadataUpdater
 }
 
 // NewNRIPlugin creates a new NRI plugin.
@@ -42,6 +55,7 @@ func NewNRIPlugin(config *types.Config, podManager *podmanager.PodManager, cniRu
 		cniRuntime:                  cniRuntime,
 		k8sClient:                   config.K8sClient,
 		interfacePrefix:             config.Flags.DefaultInterfacePrefix,
+		enableDeviceMetadata:        config.Flags.EnableDeviceMetadata,
 		networkDeviceDataUpdateChan: make(chan types.NetworkDataChanStructList, 100),
 	}
 	var err error
@@ -61,6 +75,10 @@ func NewNRIPlugin(config *types.Config, podManager *podmanager.PodManager, cniRu
 	}
 
 	return p, nil
+}
+
+func (p *Plugin) SetMetadataUpdater(updater MetadataUpdater) {
+	p.metadataUpdater = updater
 }
 
 // Start starts the NRI plugin.
@@ -177,6 +195,7 @@ func (p *Plugin) updateNetworkDeviceDataRunner(ctx context.Context) {
 func (p *Plugin) updateNetworkDeviceData(ctx context.Context, networkDataChanStructList types.NetworkDataChanStructList) {
 	logger := klog.FromContext(ctx).WithName("updateNetworkDeviceData")
 	logger.Info("Updating network device data", "networkDataChanStructList", networkDataChanStructList)
+	updatedRequests := make(map[string]bool)
 
 	for _, networkDataChanStruct := range networkDataChanStructList {
 		// get the claim object
@@ -215,7 +234,72 @@ func (p *Plugin) updateNetworkDeviceData(ctx context.Context, networkDataChanStr
 			logger.Error(err, "Failed to update claim network data", "claim", claim.UID)
 			continue
 		}
+		if err := p.updateDeviceMetadata(ctx, claim, networkDataChanStruct, networkDataChanStructList, updatedRequests); err != nil {
+			logger.Error(err, "Failed to update device metadata", "claim", claim.UID, "deviceName", networkDataChanStruct.PreparedDevice.Device.DeviceName)
+		}
 	}
+}
+
+func (p *Plugin) updateDeviceMetadata(
+	ctx context.Context,
+	claim *resourceapi.ResourceClaim,
+	networkData *types.NetworkDataChanStruct,
+	networkDataList types.NetworkDataChanStructList,
+	updatedRequests map[string]bool,
+) error {
+	if !p.enableDeviceMetadata || p.metadataUpdater == nil {
+		return nil
+	}
+
+	requestNames := networkData.PreparedDevice.Device.GetRequestNames()
+	if len(requestNames) == 0 {
+		return nil
+	}
+
+	for _, requestName := range requestNames {
+		updateKey := fmt.Sprintf("%s/%s", claim.UID, requestName)
+		if updatedRequests[updateKey] {
+			continue
+		}
+		devices := p.devicesForRequest(networkDataList, networkData.PreparedDevice.ClaimNamespacedName.Namespace, networkData.PreparedDevice.ClaimNamespacedName.Name, requestName)
+		if len(devices) == 0 {
+			continue
+		}
+		if err := p.metadataUpdater.UpdateRequestMetadata(
+			ctx,
+			claim.Namespace,
+			claim.Name,
+			claim.UID,
+			requestName,
+			devices,
+		); err != nil {
+			return fmt.Errorf("update request metadata for %s failed: %w", requestName, err)
+		}
+		updatedRequests[updateKey] = true
+	}
+	return nil
+}
+
+func (p *Plugin) devicesForRequest(
+	networkDataList types.NetworkDataChanStructList,
+	claimNamespace, claimName, requestName string,
+) []kubeletplugin.Device {
+	devices := make([]kubeletplugin.Device, 0, len(networkDataList))
+	for _, item := range networkDataList {
+		if item == nil || item.PreparedDevice == nil {
+			continue
+		}
+		if item.PreparedDevice.ClaimNamespacedName.Namespace != claimNamespace || item.PreparedDevice.ClaimNamespacedName.Name != claimName {
+			continue
+		}
+		for _, deviceRequestName := range item.PreparedDevice.Device.GetRequestNames() {
+			if deviceRequestName == requestName {
+				devices = append(devices, item.PreparedDevice.ToKubeletPluginDevice(item.NetworkDeviceData))
+				break
+			}
+		}
+	}
+	return devices
 }
 
 // updateClaimNetworkDataWithRetry updates the network device data for a claim with retries.

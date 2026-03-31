@@ -10,12 +10,36 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/containerd/nri/pkg/api"
+	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/dynamic-resource-allocation/kubeletplugin"
+	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 
 	cnimock "github.com/k8snetworkplumbingwg/dra-driver-sriov/pkg/cni/mock"
+	"github.com/k8snetworkplumbingwg/dra-driver-sriov/pkg/consts"
 	"github.com/k8snetworkplumbingwg/dra-driver-sriov/pkg/podmanager"
 	"github.com/k8snetworkplumbingwg/dra-driver-sriov/pkg/types"
 )
+
+type fakeMetadataUpdater struct {
+	callCount   int
+	requestName string
+	devices     []kubeletplugin.Device
+}
+
+func (f *fakeMetadataUpdater) UpdateRequestMetadata(
+	_ context.Context,
+	_, _ string,
+	_ k8stypes.UID,
+	requestName string,
+	devices []kubeletplugin.Device,
+) error {
+	f.callCount++
+	f.requestName = requestName
+	f.devices = devices
+	return nil
+}
 
 var _ = Describe("NRI Plugin", func() {
 	var (
@@ -239,5 +263,128 @@ var _ = Describe("NRI Update Network Device Data Runner", func() {
 
 		// Should exit
 		Eventually(done, time.Second).Should(Receive())
+	})
+})
+
+var _ = Describe("NRI metadata updates", func() {
+	It("updates request metadata when enabled", func() {
+		pciAddress := "0000:08:00.1"
+		updater := &fakeMetadataUpdater{}
+		plugin := &Plugin{
+			enableDeviceMetadata: true,
+			metadataUpdater:      updater,
+		}
+
+		prepared := &types.PreparedDevice{
+			Device: drapbv1.Device{
+				RequestNames: []string{"request-a"},
+				PoolName:     "pool-a",
+				DeviceName:   "dev-a",
+				CdiDeviceIds: []string{"cdi-a"},
+			},
+			IfName: "vfnet0",
+			DeviceAttributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+				resourceapi.QualifiedName(consts.AttributePciAddress): {
+					StringValue: &pciAddress,
+				},
+			},
+		}
+		claim := &resourceapi.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "claim-a",
+				UID:       k8stypes.UID("claim-a-uid"),
+			},
+		}
+		networkData := &types.NetworkDataChanStruct{
+			PreparedDevice: prepared,
+			NetworkDeviceData: &resourceapi.NetworkDeviceData{
+				InterfaceName: "net1",
+				IPs:           []string{"10.10.0.10/24"},
+			},
+		}
+
+		networkDataList := types.NetworkDataChanStructList{networkData}
+		err := plugin.updateDeviceMetadata(context.Background(), claim, networkData, networkDataList, map[string]bool{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updater.callCount).To(Equal(1))
+		Expect(updater.requestName).To(Equal("request-a"))
+		Expect(updater.devices).To(HaveLen(1))
+		Expect(updater.devices[0].Metadata).NotTo(BeNil())
+		Expect(updater.devices[0].Metadata.NetworkData).To(Equal(networkData.NetworkDeviceData))
+		Expect(updater.devices[0].Metadata.Attributes).To(HaveKey(consts.AttributePciAddress))
+		Expect(updater.devices[0].Metadata.Attributes).To(HaveKey(consts.AttributeInterfaceName))
+	})
+
+	It("updates each request once with all devices", func() {
+		pciAddressA := "0000:08:00.1"
+		pciAddressB := "0000:08:00.2"
+		updater := &fakeMetadataUpdater{}
+		plugin := &Plugin{
+			enableDeviceMetadata: true,
+			metadataUpdater:      updater,
+		}
+		claim := &resourceapi.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "claim-a",
+				UID:       k8stypes.UID("claim-a-uid"),
+			},
+		}
+
+		deviceA := &types.NetworkDataChanStruct{
+			PreparedDevice: &types.PreparedDevice{
+				ClaimNamespacedName: kubeletplugin.NamespacedObject{
+					NamespacedName: k8stypes.NamespacedName{
+						Namespace: "default",
+						Name:      "claim-a",
+					},
+					UID: k8stypes.UID("claim-a-uid"),
+				},
+				Device: drapbv1.Device{
+					RequestNames: []string{"request-a"},
+					PoolName:     "pool-a",
+					DeviceName:   "dev-a",
+					CdiDeviceIds: []string{"cdi-a"},
+				},
+				IfName: "vfnet0",
+				DeviceAttributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+					resourceapi.QualifiedName(consts.AttributePciAddress): {StringValue: &pciAddressA},
+				},
+			},
+			NetworkDeviceData: &resourceapi.NetworkDeviceData{InterfaceName: "net1"},
+		}
+		deviceB := &types.NetworkDataChanStruct{
+			PreparedDevice: &types.PreparedDevice{
+				ClaimNamespacedName: kubeletplugin.NamespacedObject{
+					NamespacedName: k8stypes.NamespacedName{
+						Namespace: "default",
+						Name:      "claim-a",
+					},
+					UID: k8stypes.UID("claim-a-uid"),
+				},
+				Device: drapbv1.Device{
+					RequestNames: []string{"request-a"},
+					PoolName:     "pool-a",
+					DeviceName:   "dev-b",
+					CdiDeviceIds: []string{"cdi-b"},
+				},
+				IfName: "vfnet1",
+				DeviceAttributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+					resourceapi.QualifiedName(consts.AttributePciAddress): {StringValue: &pciAddressB},
+				},
+			},
+			NetworkDeviceData: &resourceapi.NetworkDeviceData{InterfaceName: "net2"},
+		}
+		dataList := types.NetworkDataChanStructList{deviceA, deviceB}
+
+		updatedRequests := map[string]bool{}
+		err := plugin.updateDeviceMetadata(context.Background(), claim, deviceA, dataList, updatedRequests)
+		Expect(err).NotTo(HaveOccurred())
+		err = plugin.updateDeviceMetadata(context.Background(), claim, deviceB, dataList, updatedRequests)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(updater.callCount).To(Equal(1))
+		Expect(updater.devices).To(HaveLen(2))
 	})
 })
