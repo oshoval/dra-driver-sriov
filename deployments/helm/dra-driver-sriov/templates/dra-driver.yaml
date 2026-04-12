@@ -101,6 +101,8 @@ spec:
           value: {{ .Values.kubeletPlugin.nriPluginIndex | quote }}
         - name: DEFAULT_INTERFACE_PREFIX
           value: {{ .Values.kubeletPlugin.defaultInterfacePrefix | quote }}
+        - name: ENABLE_DEVICE_METADATA
+          value: {{ .Values.kubeletPlugin.enableDeviceMetadata | quote }}
         - name: NODE_NAME
           valueFrom:
             fieldRef:
